@@ -6,9 +6,19 @@ import androidx.core.content.ContextCompat;
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanResult;
+import android.bluetooth.le.ScanSettings;
+import android.companion.BluetoothLeDeviceFilter;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Log;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -64,6 +74,66 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      */
     private boolean dataTransmission = true;
 
+    /**
+     * Phone's BT adapter
+     */
+    private BluetoothAdapter bluetoothAdapter = null;
+
+    /**
+     * BT scanning handler
+     */
+    private Handler bluetoothHandler = null;
+    private HandlerThread bluetoothThread = null;
+
+    /**
+     * BLE scanning handler
+     */
+    private BluetoothLeScanner bleScanner = null;
+
+    private ScanCallback scanCallback = new ScanCallback() {
+        @Override
+        public void onScanResult(int callbackType, ScanResult result) {
+            super.onScanResult(callbackType, result);
+            if (result!=null) {
+                BluetoothDevice detected = result.getDevice();
+                if (detected.getName() != null) {
+
+                    Log.d("MUSE", "Detected BLE: " + detected.toString());
+
+                    if (detected.getName().toLowerCase().startsWith("muse-")) {
+                        //found muse
+                        if(detected.getBondState() == BluetoothDevice.BOND_NONE) {
+
+                            Toast.makeText(getApplicationContext(), "Found Muse, pairing...", Toast.LENGTH_SHORT).show();
+
+                            Intent pairMuse = new Intent(BluetoothDevice.ACTION_PAIRING_REQUEST);
+                            pairMuse.putExtra("android.bluetooth.device.extra.DEVICE", detected);
+                            sendBroadcast(pairMuse);
+                        } else if (detected.getBondState() == BluetoothDevice.BOND_BONDED) {
+                            if(manager != null) {
+
+                                Toast.makeText(getApplicationContext(), "Connecting to Muse...", Toast.LENGTH_SHORT).show();
+
+                                manager.stopListening();
+                                manager.startListening();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        @Override
+        public void onBatchScanResults(List<ScanResult> results) {
+            super.onBatchScanResults(results);
+        }
+
+        @Override
+        public void onScanFailed(int errorCode) {
+            super.onScanFailed(errorCode);
+        }
+    };
+
     // UI elements
     Spinner spinner;
     TextView status;
@@ -93,9 +163,40 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         // Register a listener to receive notifications of what Muse headbands
         // we can connect to.
         manager.setMuseListener(museListener);
+    }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
         // Request permissions for devices with API 23+
-        ensurePermissions();
+        if(ensurePermissions()) {
+
+            if (bluetoothAdapter == null) bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+            if (!bluetoothAdapter.isEnabled()) {
+                Intent enableBluetooth = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(enableBluetooth);
+            } else {
+                if (bluetoothHandler == null) {
+                    bluetoothThread = new HandlerThread("Muse-Bluetooth");
+                    bluetoothThread.start();
+                    bluetoothHandler = new Handler(bluetoothThread.getLooper());
+                    bleScanner = bluetoothAdapter.getBluetoothLeScanner();
+                    bluetoothHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            bleScanner.flushPendingScanResults(scanCallback);
+                            bluetoothHandler.postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    bluetoothAdapter.getBluetoothLeScanner().stopScan(scanCallback);
+                                }
+                            }, 10000);
+                            bleScanner.startScan(null, new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build(), scanCallback);
+                        }
+                    });
+                }
+            }
+        }
     }
 
     @Override
@@ -180,11 +281,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      * If the permission is not granted, then Muse 2016 (MU-02) headbands will
      * not be discovered and a SecurityException will be thrown.
      */
-    private void ensurePermissions() {
-
-        if (ContextCompat.checkSelfPermission(this,
-                Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-
+    private boolean ensurePermissions() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             // We don't have the ACCESS_COARSE_LOCATION permission so create the dialogs asking
             // the user to grant us the permission.
             DialogInterface.OnClickListener buttonListener =
@@ -208,7 +306,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                     .setCancelable(false)
                     .create();
             introDialog.show();
+
+            return false;
         }
+        return true;
     }
 
 
@@ -225,10 +326,23 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         @Override
         public void museListChanged() {
             final List<Muse> list = manager.getMuses();
-            spinnerAdapter.clear();
-            for (Muse m : list) {
-                spinnerAdapter.add(m.getName() + " - " + m.getMacAddress());
-            }
+//            spinnerAdapter.clear();
+//            for (Muse m : list) {
+//                spinnerAdapter.add(m.getName() + " - " + m.getMacAddress());
+//            }
+
+            Muse muse = list.get(0);
+            muse.unregisterAllListeners();
+            muse.registerConnectionListener(connectionListener);
+            muse.registerDataListener(dataListener, MuseDataPacketType.EEG);
+            muse.registerDataListener(dataListener, MuseDataPacketType.ALPHA_RELATIVE);
+            muse.registerDataListener(dataListener, MuseDataPacketType.ACCELEROMETER);
+            muse.registerDataListener(dataListener, MuseDataPacketType.BATTERY);
+            muse.registerDataListener(dataListener, MuseDataPacketType.DRL_REF);
+            muse.registerDataListener(dataListener, MuseDataPacketType.QUANTIZATION);
+
+            // Initiate a connection to the headband and stream the data asynchronously.
+            muse.runAsynchronously();
         }
     };
 
