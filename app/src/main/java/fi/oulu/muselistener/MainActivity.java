@@ -49,7 +49,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      * headband, register listeners to receive EEG data and get headband
      * configuration and version information.
      */
-    private Muse muse;
+    // private Muse muse;
 
 
     /**
